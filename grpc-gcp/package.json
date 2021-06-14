@@ -36,7 +36,7 @@
   },
   "devDependencies": {
     "@grpc/proto-loader": "0.6.2",
-    "c8": "7.7.2",
+    "c8": "7.7.3",
     "google-auth-library": "7.1.0",
     "google-gax": "2.14.1",
     "google-protobuf": "3.17.1",

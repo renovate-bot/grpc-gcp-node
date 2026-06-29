@@ -39,8 +39,7 @@ const _INSTANCE_ID =
   'test-instance-' + Math.floor(Math.random() * _MAX_RAND_ID);
 const _DATABASE_ID = 'test-db-' + Math.floor(Math.random() * _MAX_RAND_ID);
 const _TABLE_NAME = 'storage';
-const _DATABASE =
-  `projects/${_PROJECT_ID}/instances/${_INSTANCE_ID}/databases/${_DATABASE_ID}`;
+const _DATABASE = `projects/${_PROJECT_ID}/instances/${_INSTANCE_ID}/databases/${_DATABASE_ID}`;
 const _TEST_SQL = `select id from ${_TABLE_NAME}`;
 const _CONFIG_FILE = `${__dirname}/spanner.grpc.config`;
 
@@ -78,12 +77,13 @@ describe('Using ' + grpcLibName, () => {
     console.log(`Waiting for operation on ${database.id} to complete...`);
     await dbOp.promise();
 
-    console.log(`Created database ${_DATABASE_ID} on instance ${_INSTANCE_ID}.`);
+    console.log(
+      `Created database ${_DATABASE_ID} on instance ${_INSTANCE_ID}.`
+    );
 
     // Create test table.
     const table = database.table(_TABLE_NAME);
-    const schema =
-        `CREATE TABLE ${_TABLE_NAME} (id STRING(1024)) PRIMARY KEY(id)`;
+    const schema = `CREATE TABLE ${_TABLE_NAME} (id STRING(1024)) PRIMARY KEY(id)`;
 
     const [, tableOp] = await table.create(schema);
     console.log(`Waiting for operation on ${table.id} to complete...`);
@@ -95,7 +95,7 @@ describe('Using ' + grpcLibName, () => {
       id: 'payload',
     };
 
-    console.log(`Inserting row to the table...`);
+    console.log('Inserting row to the table...');
     await table.insert(row);
     console.log(`Row inserted into table "${_TABLE_NAME}".`);
   });
@@ -294,14 +294,8 @@ describe('Using ' + grpcLibName, () => {
         Promise.all(createCallPromises)
           .then(
             results => {
-              assert.strictEqual(
-                pool.channelRefs.length,
-                expectedNumChannels
-              );
-              assert.strictEqual(
-                pool.channelRefs[0].affinityCount,
-                watermark
-              );
+              assert.strictEqual(pool.channelRefs.length, expectedNumChannels);
+              assert.strictEqual(pool.channelRefs[0].affinityCount, watermark);
               assert.strictEqual(
                 pool.channelRefs[0].activeStreamsCount,
                 watermark
@@ -334,10 +328,7 @@ describe('Using ' + grpcLibName, () => {
           )
           .then(
             () => {
-              assert.strictEqual(
-                pool.channelRefs.length,
-                expectedNumChannels
-              );
+              assert.strictEqual(pool.channelRefs.length, expectedNumChannels);
               assert.strictEqual(pool.channelRefs[0].affinityCount, 0);
               assert.strictEqual(pool.channelRefs[0].activeStreamsCount, 0);
               done();

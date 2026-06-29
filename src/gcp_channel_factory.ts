@@ -26,6 +26,8 @@ import ApiConfig = protoRoot.grpc.gcp.ApiConfig;
 import IAffinityConfig = protoRoot.grpc.gcp.IAffinityConfig;
 
 const CLIENT_CHANNEL_ID = 'grpc_gcp.client_channel.id';
+const CLEANUP_INTERVAL_MS = 30000; // Sweep every 30 seconds
+const IDLE_TIMEOUT_MS = 180000; // Keys are considered idle if unused for more than 3 minutes
 
 export type GrpcModule = typeof grpcType;
 
@@ -34,8 +36,9 @@ export interface GcpChannelFactoryInterface extends grpcType.ChannelInterface {
   getAffinityConfig(methodName: string): IAffinityConfig;
   bind(channelRef: ChannelRef, affinityKey: string): void;
   unbind(boundKey?: string): void;
-  shouldRequestDebugHeaders(lastRequested: Date | null) : boolean;
-
+  shouldRequestDebugHeaders(lastRequested: Date | null): boolean;
+  isBound(affinityKey: string): boolean;
+  bindIfUnbound(channelRef: ChannelRef, affinityKey: string): boolean;
 }
 
 export interface GcpChannelFactoryConstructor {
@@ -59,7 +62,9 @@ export function getGcpChannelFactoryClass(
     private maxConcurrentStreamsLowWatermark: number;
     private options: {};
     private methodToAffinity: {[key: string]: IAffinityConfig} = {};
-    private affinityKeyToChannelRef: {[affinityKey: string]: ChannelRef} = {};
+    private affinityKeyToChannelRef = new Map<string, ChannelRef>();
+    private affinityKeyLastAccessed = new Map<string, number>();
+    private cleanupTimer: ReturnType<typeof setInterval>;
     private channelRefs: ChannelRef[] = [];
     private target: string;
     private credentials: grpcType.ChannelCredentials;
@@ -100,9 +105,12 @@ export function getGcpChannelFactoryClass(
           }
 
           if (this.maxSize < this.minSize) {
-            throw new Error('Invalid channelPool config: minSize must <= maxSize')
+            throw new Error(
+              'Invalid channelPool config: minSize must <= maxSize'
+            );
           }
-          this.debugHeaderIntervalSecs = channelPool.debugHeaderIntervalSecs || 0;
+          this.debugHeaderIntervalSecs =
+            channelPool.debugHeaderIntervalSecs || 0;
         }
         this.initMethodToAffinityMap(gcpApiConfig);
       }
@@ -115,6 +123,15 @@ export function getGcpChannelFactoryClass(
       // Create initial channels
       for (let i = 0; i < this.minSize; i++) {
         this.addChannel();
+      }
+
+      // Periodically clean up affinity keys that haven't been accessed for a while to prevent unbounded growth.
+      this.cleanupTimer = setInterval(
+        () => this.cleanupIdleKeys(),
+        CLEANUP_INTERVAL_MS
+      );
+      if (this.cleanupTimer.unref) {
+        this.cleanupTimer.unref();
       }
     }
 
@@ -146,24 +163,31 @@ export function getGcpChannelFactoryClass(
      * @return Wrapper containing the grpc channel.
      */
     getChannelRef(affinityKey?: string): ChannelRef {
-      if (affinityKey && this.affinityKeyToChannelRef[affinityKey]) {
+      if (affinityKey && this.affinityKeyLastAccessed.has(affinityKey)) {
+        this.affinityKeyLastAccessed.set(affinityKey, Date.now());
+      }
+      if (affinityKey && this.affinityKeyToChannelRef.has(affinityKey)) {
         // Chose an bound channel if affinityKey is specified.
-        return this.affinityKeyToChannelRef[affinityKey];
+        return this.affinityKeyToChannelRef.get(affinityKey)!;
       }
 
-      // Sort channel refs by active streams count.
-      this.channelRefs.sort((ref1, ref2) => {
-        return ref1.getActiveStreamsCount() - ref2.getActiveStreamsCount();
-      });
+      // Find the channelRef that has the least busy channel.
+      let minRef = this.channelRefs[0];
+      for (let i = 1; i < this.channelRefs.length; i++) {
+        if (
+          this.channelRefs[i].getActiveStreamsCount() <
+          minRef.getActiveStreamsCount()
+        ) {
+          minRef = this.channelRefs[i];
+        }
+      }
 
       const size = this.channelRefs.length;
-      // Chose the channelRef that has the least busy channel.
       if (
         size > 0 &&
-        this.channelRefs[0].getActiveStreamsCount() <
-          this.maxConcurrentStreamsLowWatermark
+        minRef.getActiveStreamsCount() < this.maxConcurrentStreamsLowWatermark
       ) {
-        return this.channelRefs[0];
+        return minRef;
       }
 
       // If all existing channels are busy, and channel pool still has capacity,
@@ -171,24 +195,41 @@ export function getGcpChannelFactoryClass(
       if (size < this.maxSize) {
         return this.addChannel();
       } else {
-        return this.channelRefs[0];
+        return minRef;
       }
+    }
+
+    private cleanupIdleKeys() {
+      const now = Date.now();
+      // Store keys to unbind in an array before iterating to avoid
+      // modifying the Map while we are actively iterating over its entries.
+      const keysToUnbind: string[] = [];
+      for (const [
+        key,
+        lastAccessed,
+      ] of this.affinityKeyLastAccessed.entries()) {
+        if (now - lastAccessed > IDLE_TIMEOUT_MS) {
+          // if a key is not in used for more than 3 minutes remove its binding
+          keysToUnbind.push(key);
+        }
+      }
+      keysToUnbind.forEach(key => this.unbind(key));
     }
 
     /**
      * Create a new channel and add it to the pool.
      * @private
      */
-    private addChannel() : ChannelRef {
+    private addChannel(): ChannelRef {
       const size = this.channelRefs.length;
       const channelOptions = Object.assign(
-          {[CLIENT_CHANNEL_ID]: size},
-          this.options
+        {[CLIENT_CHANNEL_ID]: size},
+        this.options
       );
       const grpcChannel = new grpc.Channel(
-          this.target,
-          this.credentials,
-          channelOptions
+        this.target,
+        this.credentials,
+        channelOptions
       );
       const channelRef = new ChannelRef(grpcChannel, size);
       this.channelRefs.push(channelRef);
@@ -201,23 +242,22 @@ export function getGcpChannelFactoryClass(
     }
 
     private setupDebugHeadersOnChannelTransition(channel: ChannelRef) {
-      const self = this;
-
       if (channel.isClosed()) {
         return;
       }
 
-      let currentState = channel.getChannel().getConnectivityState(false);
-      if (currentState == connectivityState.SHUTDOWN) {
+      const currentState = channel.getChannel().getConnectivityState(false);
+      if (currentState === connectivityState.SHUTDOWN) {
         return;
       }
 
-      channel.getChannel().watchConnectivityState(currentState, Infinity, (e) => {
-        channel.forceDebugHeadersOnNextRequest();
-        self.setupDebugHeadersOnChannelTransition(channel);
-      });
+      channel
+        .getChannel()
+        .watchConnectivityState(currentState, Infinity, () => {
+          channel.forceDebugHeadersOnNextRequest();
+          this.setupDebugHeadersOnChannelTransition(channel);
+        });
     }
-
 
     /**
      * Get AffinityConfig associated with a certain method.
@@ -227,12 +267,15 @@ export function getGcpChannelFactoryClass(
       return this.methodToAffinity[methodName];
     }
 
-    shouldRequestDebugHeaders(lastRequested: Date | null) : boolean {
+    shouldRequestDebugHeaders(lastRequested: Date | null): boolean {
       if (this.debugHeaderIntervalSecs < 0) return true;
-      else if (this.debugHeaderIntervalSecs == 0) return false;
+      else if (this.debugHeaderIntervalSecs === 0) return false;
       else if (!lastRequested) return true;
 
-      return new Date().getTime() - lastRequested.getTime() > this.debugHeaderIntervalSecs * 1000;
+      return (
+        new Date().getTime() - lastRequested.getTime() >
+        this.debugHeaderIntervalSecs * 1000
+      );
     }
 
     /**
@@ -242,11 +285,40 @@ export function getGcpChannelFactoryClass(
      */
     bind(channelRef: ChannelRef, affinityKey: string): void {
       if (!affinityKey || !channelRef) return;
-      const existingChannelRef = this.affinityKeyToChannelRef[affinityKey];
+      let existingChannelRef = this.affinityKeyToChannelRef.get(affinityKey);
       if (!existingChannelRef) {
-        this.affinityKeyToChannelRef[affinityKey] = channelRef;
+        this.affinityKeyToChannelRef.set(affinityKey, channelRef);
+        existingChannelRef = channelRef;
       }
-      this.affinityKeyToChannelRef[affinityKey].affinityCountIncr();
+      // We explicitly do NOT add regular session keys to affinityKeyLastAccessed
+      // to ensure they are not cleaned up by the 3-minute TTL idle sweep.
+      existingChannelRef.affinityCountIncr();
+    }
+
+    /**
+     * Checks if an affinity key is already bound to a channel.
+     */
+    isBound(affinityKey: string): boolean {
+      return this.affinityKeyToChannelRef.has(affinityKey);
+    }
+
+    /**
+     * Binds an affinity key to a channel if it is not already bound.
+     * This ensures atomic binding on the first request of a transaction,
+     * preventing race conditions when multiple concurrent requests start.
+     *
+     * @param channelRef The channel to bind to.
+     * @param affinityKey The unique key for the transaction.
+     */
+    bindIfUnbound(channelRef: ChannelRef, affinityKey: string): boolean {
+      if (!affinityKey || !channelRef) return false;
+      if (!this.affinityKeyToChannelRef.has(affinityKey)) {
+        this.affinityKeyToChannelRef.set(affinityKey, channelRef);
+        this.affinityKeyLastAccessed.set(affinityKey, Date.now());
+        channelRef.affinityCountIncr();
+        return true;
+      }
+      return false;
     }
 
     /**
@@ -255,11 +327,19 @@ export function getGcpChannelFactoryClass(
      */
     unbind(boundKey?: string): void {
       if (!boundKey) return;
-      const boundChannelRef = this.affinityKeyToChannelRef[boundKey];
+      const boundChannelRef = this.affinityKeyToChannelRef.get(boundKey);
       if (boundChannelRef) {
         boundChannelRef.affinityCountDecr();
-        if (boundChannelRef.getAffinityCount() <= 0) {
-          delete this.affinityKeyToChannelRef[boundKey];
+        // SAFEGUARD: If it's a custom multiplexed transaction key (which exists in affinityKeyLastAccessed),
+        // we force delete it to prevent memory leaks, because custom keys are ephemeral.
+        // For legacy keys (regular Spanner sessions), we preserve the old behavior
+        // which waits for the entire channel's affinityCount to hit 0 before deleting.
+        if (
+          this.affinityKeyLastAccessed.has(boundKey) ||
+          boundChannelRef.getAffinityCount() <= 0
+        ) {
+          this.affinityKeyToChannelRef.delete(boundKey);
+          this.affinityKeyLastAccessed.delete(boundKey);
         }
       }
     }
@@ -268,6 +348,9 @@ export function getGcpChannelFactoryClass(
      * Close all channels in the channel pool.
      */
     close(): void {
+      if (this.cleanupTimer) {
+        clearInterval(this.cleanupTimer);
+      }
       this.channelRefs.forEach(ref => {
         ref.close();
       });

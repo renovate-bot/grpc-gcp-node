@@ -3,3 +3,4 @@ test/google
 test/googleapis
 src/generated
 build/
+cloudprober/

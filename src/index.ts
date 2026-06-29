@@ -70,7 +70,10 @@ const setup = (grpc: GrpcModule) => {
   function gcpCallInvocationTransformer<RequestType, ResponseType>(
     callProperties: grpcType.CallProperties<RequestType, ResponseType>
   ): grpcType.CallProperties<RequestType, ResponseType> {
-    if (!callProperties.channel || !(callProperties.channel instanceof GcpChannelFactory)) {
+    if (
+      !callProperties.channel ||
+      !(callProperties.channel instanceof GcpChannelFactory)
+    ) {
       // The gcpCallInvocationTransformer needs to use gcp channel factory.
       return callProperties;
     }
@@ -85,7 +88,22 @@ const setup = (grpc: GrpcModule) => {
     const callOptions = callProperties.callOptions;
     const callback = callProperties.callback;
 
-    const preProcessResult = preProcess(channelFactory, path, argument);
+    const affinityConfig = channelFactory.getAffinityConfig(path);
+    let affinityKeyFromCallOptions: string | undefined;
+
+    // Check if CallOptions contains the affinity key
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if (affinityConfig && (callOptions as any).affinityKey) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      affinityKeyFromCallOptions = (callOptions as any).affinityKey;
+    }
+
+    const preProcessResult = preProcess(
+      channelFactory,
+      affinityConfig,
+      argument,
+      affinityKeyFromCallOptions
+    );
     const channelRef = preProcessResult.channelRef;
 
     const boundKey = preProcessResult.boundKey;
@@ -120,14 +138,32 @@ const setup = (grpc: GrpcModule) => {
               status: grpcType.StatusObject,
               next: Function
             ) => {
+              // Always decrement stream count on status receive (stream closed)
+              channelRef.activeStreamsCountDecr();
+
               if (status.code === grpc.status.OK) {
                 postProcess(
                   channelFactory,
                   channelRef,
-                  path,
+                  affinityConfig,
                   boundKey,
                   firstMessage
                 );
+              }
+
+              // Check if CallOptions contains the explicit unbind signal
+              // or if the stream was aborted, which automatically invalidates
+              // the current affinity context.
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              if (boundKey && affinityConfig) {
+                if (
+                  (callOptions as any).unbind === true ||
+                  (affinityKeyFromCallOptions &&
+                    (status.code === grpc.status.ABORTED ||
+                      status.code === grpc.status.CANCELLED))
+                ) {
+                  channelFactory.unbind(boundKey);
+                }
               }
               next(status);
             },
@@ -155,7 +191,11 @@ const setup = (grpc: GrpcModule) => {
       : [];
     newCallOptions.interceptors = interceptors.concat([postProcessInterceptor]);
 
-    if (channelFactory.shouldRequestDebugHeaders(channelRef.getDebugHeadersRequestedAt())) {
+    if (
+      channelFactory.shouldRequestDebugHeaders(
+        channelRef.getDebugHeadersRequestedAt()
+      )
+    ) {
       metadata.set('x-return-encrypted-headers', 'all_response');
       channelRef.notifyDebugHeadersRequested();
     }
@@ -174,20 +214,22 @@ const setup = (grpc: GrpcModule) => {
   /**
    * Handle channel affinity and pick a channel before call starts.
    * @param channelFactory The channel management factory.
-   * @param path Method path.
+   * @param affinityConfig Affinity configuration object.
    * @param argument The request arguments object.
+   * @param overrideAffinityKey Optional affinity key provided in CallOptions.
    * @return Result containing bound affinity key and the chosen channel ref
    * object.
    */
   function preProcess(
     channelFactory: GcpChannelFactoryInterface,
-    path: string,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    argument?: any
+    affinityConfig?: any,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    argument?: any,
+    overrideAffinityKey?: string
   ): {boundKey: string | undefined; channelRef: ChannelRef} {
-    const affinityConfig = channelFactory.getAffinityConfig(path);
-    let boundKey;
-    if (argument && affinityConfig) {
+    let boundKey = overrideAffinityKey;
+    if (!boundKey && argument && affinityConfig) {
       const command = affinityConfig.command;
       if (
         command === AffinityConfig.Command.BOUND ||
@@ -201,6 +243,11 @@ const setup = (grpc: GrpcModule) => {
     }
     const channelRef = channelFactory.getChannelRef(boundKey);
     channelRef.activeStreamsCountIncr();
+
+    if (overrideAffinityKey) {
+      channelFactory.bindIfUnbound(channelRef, overrideAffinityKey);
+    }
+
     return {
       boundKey,
       channelRef,
@@ -211,20 +258,20 @@ const setup = (grpc: GrpcModule) => {
    * Handle channel affinity and streams count after call is done.
    * @param channelFactory The channel management factory.
    * @param channelRef ChannelRef instance that contains a real grpc channel.
-   * @param path Method path.
+   * @param affinityConfig Affinity configuration object.
    * @param boundKey Affinity key bound to a channel.
    * @param responseMsg Response proto message.
    */
   function postProcess(
     channelFactory: GcpChannelFactoryInterface,
     channelRef: ChannelRef,
-    path: string,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    affinityConfig?: any,
     boundKey?: string,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     responseMsg?: any
   ) {
     if (!channelFactory || !responseMsg) return;
-    const affinityConfig = channelFactory.getAffinityConfig(path);
     if (affinityConfig && affinityConfig.command) {
       const command = affinityConfig.command;
       if (command === AffinityConfig.Command.BIND) {
@@ -237,7 +284,6 @@ const setup = (grpc: GrpcModule) => {
         channelFactory.unbind(boundKey);
       }
     }
-    channelRef.activeStreamsCountDecr();
   }
 
   /**

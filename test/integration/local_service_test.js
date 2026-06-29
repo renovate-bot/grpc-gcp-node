@@ -15,29 +15,22 @@
  * limitations under the License.
  *
  */
-
 /**
  * @fileoverview Integration tests for spanner grpc requests.
  */
-
 'use strict';
-
 const protoLoader = require('@grpc/proto-loader');
 const assert = require('assert');
 const getGrpcGcpObjects = require('../../build/src');
-const { promisify } = require('util')
-
+const {promisify} = require('util');
 const PROTO_PATH = __dirname + '/../../protos/test_service.proto';
 const packageDef = protoLoader.loadSync(PROTO_PATH);
-
 for (const grpcLibName of ['grpc', '@grpc/grpc-js']) {
   describe('Using ' + grpcLibName, () => {
     const grpc = require(grpcLibName);
     const grpcGcp = getGrpcGcpObjects(grpc);
-
     const server_insecure_creds = grpc.ServerCredentials.createInsecure();
     const Client = grpc.loadPackageDefinition(packageDef).TestService;
-
     const initApiConfig = function () {
       return grpcGcp.createGcpApiConfig({
         channelPool: {
@@ -46,7 +39,6 @@ for (const grpcLibName of ['grpc', '@grpc/grpc-js']) {
         },
       });
     };
-
     describe('Local service integration tests', () => {
       let server;
       let port;
@@ -57,7 +49,13 @@ for (const grpcLibName of ['grpc', '@grpc/grpc-js']) {
         server.addService(Client.service, {
           unary: function (call, cb) {
             call.sendMetadata(call.metadata);
-            cb(null, {});
+            const forceErrorCode = call.metadata.get('force-error-code');
+            if (forceErrorCode && forceErrorCode.length > 0) {
+              const code = parseInt(forceErrorCode[0]);
+              cb({code, details: 'Forced error'});
+            } else {
+              cb(null, {});
+            }
           },
           clientStream: function (stream, cb) {
             stream.on('data', data => {});
@@ -94,7 +92,6 @@ for (const grpcLibName of ['grpc', '@grpc/grpc-js']) {
       after(() => {
         server.forceShutdown();
       });
-
       describe('Different channel options', () => {
         it('no api config', done => {
           const channelOptions = {
@@ -129,7 +126,6 @@ for (const grpcLibName of ['grpc', '@grpc/grpc-js']) {
           done();
         });
       });
-
       // describe('Debug headers', () => {
       //   let client;
       //   beforeEach(() => {
@@ -144,7 +140,6 @@ for (const grpcLibName of ['grpc', '@grpc/grpc-js']) {
       //         },
       //       }),
       //     };
-
       //     client = new Client(
       //         'localhost:' + port,
       //         grpc.credentials.createInsecure(),
@@ -158,23 +153,18 @@ for (const grpcLibName of ['grpc', '@grpc/grpc-js']) {
       //     function makeCallAndReturnMeta() {
       //       return new Promise((resolve, reject) => {
       //         let lastMeta = null;
-
       //         const call = client.unary({}, new grpc.Metadata(), (err, data) => {
       //           if (err) reject(err);
       //           else resolve(lastMeta);
       //         });
-
       //         call.on('metadata', meta => lastMeta = meta);
       //       });
       //     }
       //     let m1 = await makeCallAndReturnMeta();
       //     assert.deepStrictEqual(m1.get('x-return-encrypted-headers'), ['all_response']);
-
       //     let m2 = await makeCallAndReturnMeta();
       //     assert.deepStrictEqual(m2.get('x-return-encrypted-headers'), []);
-
       //     await promisify(setTimeout)(1100);
-
       //     let m3 = await makeCallAndReturnMeta();
       //     assert.deepStrictEqual(m3.get('x-return-encrypted-headers'), ['all_response']);
       //   });
@@ -188,12 +178,9 @@ for (const grpcLibName of ['grpc', '@grpc/grpc-js']) {
       //     }
       //     let m1 = await makeCallAndReturnMeta();
       //     assert.deepStrictEqual(m1.get('x-return-encrypted-headers'), ['all_response']);
-
       //     let m2 = await makeCallAndReturnMeta();
       //     assert.deepStrictEqual(m2.get('x-return-encrypted-headers'), []);
-
       //     await promisify(setTimeout)(1100);
-
       //     let m3 = await makeCallAndReturnMeta();
       //     assert.deepStrictEqual(m3.get('x-return-encrypted-headers'), ['all_response']);
       //   });
@@ -208,13 +195,11 @@ for (const grpcLibName of ['grpc', '@grpc/grpc-js']) {
             callInvocationTransformer: grpcGcp.gcpCallInvocationTransformer,
             gcpApiConfig: apiConfig,
           };
-
           client = new Client(
             'localhost:' + port,
             grpc.credentials.createInsecure(),
             channelOptions
           );
-
           metadata = new grpc.Metadata();
           metadata.set('key', 'value');
         });
@@ -347,6 +332,102 @@ for (const grpcLibName of ['grpc', '@grpc/grpc-js']) {
               });
               call.end();
             });
+          });
+        });
+      });
+
+      describe('Custom Affinity via CallOptions', () => {
+        let client;
+        let pool;
+        beforeEach(() => {
+          const gcpApiConfig = grpcGcp.createGcpApiConfig({
+            channelPool: {
+              maxSize: 3,
+            },
+            method: [
+              {
+                name: ['/TestService/Unary'],
+                affinity: {
+                  command: 'PENDING',
+                  affinityKey: 'ignored',
+                },
+              },
+            ],
+          });
+          const options = {gcpApiConfig};
+          options.channelOverride = grpcGcp.gcpChannelFactoryOverride(
+            'localhost:' + port,
+            grpc.credentials.createInsecure(),
+            options
+          );
+          options.callInvocationTransformer =
+            grpcGcp.gcpCallInvocationTransformer;
+
+          client = new Client(
+            'localhost:' + port,
+            grpc.credentials.createInsecure(),
+            options
+          );
+          pool = options.channelOverride;
+        });
+        afterEach(() => {
+          client.close();
+        });
+        it('should route requests with the same custom affinityKey to the same channel', done => {
+          const affinityKey = 'custom-key-123';
+          client.unary({}, {affinityKey}, (err, response) => {
+            assert.ifError(err);
+            assert.strictEqual(pool.isBound(affinityKey), true);
+            const boundChannel = pool.getChannelRef(affinityKey);
+            client.unary({}, {affinityKey}, (err2, response2) => {
+              assert.ifError(err2);
+              const secondChannel = pool.getChannelRef(affinityKey);
+              assert.strictEqual(secondChannel, boundChannel);
+              done();
+            });
+          });
+        });
+        it('should unbind the channel when unbind: true is passed', done => {
+          const affinityKey = 'custom-key-456';
+          client.unary({}, {affinityKey}, err => {
+            assert.ifError(err);
+            assert.strictEqual(pool.isBound(affinityKey), true);
+            client.unary({}, {affinityKey, unbind: true}, err2 => {
+              assert.ifError(err2);
+              assert.strictEqual(pool.isBound(affinityKey), false);
+              done();
+            });
+          });
+        });
+        it('should automatically unbind on ABORTED error', done => {
+          const affinityKey = 'custom-key-789';
+          client.unary({}, {affinityKey}, err => {
+            assert.ifError(err);
+            assert.strictEqual(pool.isBound(affinityKey), true);
+            // Force ABORTED (code 10) error via metadata
+            const metadata = new grpc.Metadata();
+            metadata.set('force-error-code', '10');
+            client.unary({}, metadata, {affinityKey}, err2 => {
+              assert.ok(err2);
+              assert.strictEqual(err2.code, 10); // Verify it aborted
+              assert.strictEqual(pool.isBound(affinityKey), false);
+              done();
+            });
+          });
+        });
+        it('should automatically unbind when call is cancelled programmatically', done => {
+          const affinityKey = 'custom-key-cancel';
+          client.unary({}, {affinityKey}, err => {
+            assert.ifError(err);
+            assert.strictEqual(pool.isBound(affinityKey), true);
+            const metadata = new grpc.Metadata();
+            const call = client.unary({}, metadata, {affinityKey}, err2 => {
+              assert.ok(err2);
+              assert.strictEqual(err2.code, grpc.status.CANCELLED);
+              assert.strictEqual(pool.isBound(affinityKey), false);
+              done();
+            });
+            call.cancel();
           });
         });
       });

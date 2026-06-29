@@ -42,7 +42,7 @@ class StackdriverUtil {
       console.log(this.api_ + '_success 0');
     }
 
-    for (var metric_name in this.metrics_) {
+    for (const metric_name in this.metrics_) {
       console.log(metric_name + ' ' + this.metrics_[metric_name]);
     }
   }
@@ -53,8 +53,11 @@ class StackdriverUtil {
   reportError(err) {
     console.error(err);
     this.errClient_.report(
-        'NodeProberFailure: gRPC(v=x.x.x) fails on ' + this.api_ +
-        ' API. Details: ' + err.toString());
+      'NodeProberFailure: gRPC(v=x.x.x) fails on ' +
+        this.api_ +
+        ' API. Details: ' +
+        err.toString()
+    );
   }
 }
 

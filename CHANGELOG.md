@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/GoogleCloudPlatform/grpc-gcp-node/compare/v1.1.0...v1.1.1) (2026-07-13)
+
+
+### Bug Fixes
+
+* **grpc-gcp:** release failure ([#213](https://github.com/GoogleCloudPlatform/grpc-gcp-node/issues/213)) ([cb2a481](https://github.com/GoogleCloudPlatform/grpc-gcp-node/commit/cb2a48162072efa836f44d37c5f4a7864dc8ab2a))
+
 ## [1.1.0](https://github.com/GoogleCloudPlatform/grpc-gcp-node/compare/v1.0.2...v1.1.0) (2026-07-06)
 
 

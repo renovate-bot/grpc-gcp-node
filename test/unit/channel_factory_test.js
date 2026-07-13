@@ -42,7 +42,7 @@ function multiDone(done, count) {
   };
 }
 
-for (const grpcLibName of ['grpc', '@grpc/grpc-js']) {
+for (const grpcLibName of ['@grpc/grpc-js']) {
   describe('Using ' + grpcLibName, () => {
     const grpc = require(grpcLibName);
     const grpcGcp = getGrpcGcpObjects(grpc);

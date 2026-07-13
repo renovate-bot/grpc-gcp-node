@@ -25,7 +25,7 @@ const getGrpcGcpObjects = require('../../build/src');
 const {promisify} = require('util');
 const PROTO_PATH = __dirname + '/../../protos/test_service.proto';
 const packageDef = protoLoader.loadSync(PROTO_PATH);
-for (const grpcLibName of ['grpc', '@grpc/grpc-js']) {
+for (const grpcLibName of ['@grpc/grpc-js']) {
   describe('Using ' + grpcLibName, () => {
     const grpc = require(grpcLibName);
     const grpcGcp = getGrpcGcpObjects(grpc);

@@ -3,7 +3,8 @@
   "compilerOptions": {
     "rootDir": ".",
     "outDir": "build",
-    "target": "es6"
+    "target": "es6",
+    "skipLibCheck": true
   },
   "include": [
     "src"

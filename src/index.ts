@@ -154,9 +154,9 @@ const setup = (grpc: GrpcModule) => {
               // Check if CallOptions contains the explicit unbind signal
               // or if the stream was aborted, which automatically invalidates
               // the current affinity context.
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
               if (boundKey && affinityConfig) {
                 if (
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
                   (callOptions as any).unbind === true ||
                   (affinityKeyFromCallOptions &&
                     (status.code === grpc.status.ABORTED ||

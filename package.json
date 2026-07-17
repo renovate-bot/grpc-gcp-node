@@ -39,7 +39,7 @@
     "@google-cloud/spanner": "^6.0.0",
     "@grpc/proto-loader": "^0.7.0",
     "@types/node": "^18.19.130",
-    "c8": "^7.7.2",
+    "c8": "^12.0.0",
     "google-auth-library": "^8.0.0",
     "google-gax": "^3.0.0",
     "google-protobuf": "^3.17.1",
